@@ -1,0 +1,11 @@
+{
+  "listen_addr": "127.0.0.1:8093",
+  "store_base_url": "http://127.0.0.1:8091",
+  "xylon_base_url": "http://127.0.0.1:8080",
+  "control_participant_id": "platform-admin",
+  "control_token_ttl_sec": 60,
+  "admin_config_path": "",
+  "admin_customer_id": "acme",
+  "seed_on_start": true,
+  "default_grace_sec": 900
+}
