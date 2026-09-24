@@ -44,14 +44,25 @@ func TestControlAllowedAndPatch(t *testing.T) {
 	if !customers.ControlAllowed(feats, customers.FeatureModerate) {
 		t.Fatal("expected moderate allowed")
 	}
+	if !customers.ControlAllowed(feats, customers.FeatureRecord) {
+		t.Fatal("expected record allowed")
+	}
 	feats[customers.FeatureModerate] = false
 	if customers.ControlAllowed(feats, customers.FeatureModerate) {
 		t.Fatal("expected moderate denied")
 	}
+	feats[customers.FeatureRecord] = false
+	if customers.ControlAllowed(feats, customers.FeatureRecord) {
+		t.Fatal("expected record denied")
+	}
 	feats[customers.FeatureControl] = false
 	feats[customers.FeatureModerate] = true
+	feats[customers.FeatureRecord] = true
 	if customers.ControlAllowed(feats, customers.FeatureModerate) {
 		t.Fatal("expected control master deny")
+	}
+	if customers.ControlAllowed(feats, customers.FeatureRecord) {
+		t.Fatal("expected control master deny for record")
 	}
 
 	d := customers.New()
@@ -66,5 +77,8 @@ func TestControlAllowedAndPatch(t *testing.T) {
 	}
 	if !customers.FeatureEnabled(c.Features, customers.FeatureModerate) {
 		t.Fatal("moderate should remain true")
+	}
+	if !customers.FeatureEnabled(c.Features, customers.FeatureRecord) {
+		t.Fatal("record should remain true")
 	}
 }

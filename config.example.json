@@ -7,5 +7,7 @@
   "admin_config_path": "",
   "admin_customer_id": "acme",
   "seed_on_start": true,
-  "default_grace_sec": 900
+  "default_grace_sec": 900,
+  "webhook_secret": "lab-webhook-secret",
+  "admin_webhook_url": "http://127.0.0.1:8092/v1/webhooks/xylon"
 }

@@ -7,6 +7,9 @@ const (
 	FeatureHistory  = "history"
 	FeatureInject   = "inject"
 	FeatureModerate = "moderate"
+	FeatureRecord   = "record"
+	FeatureSessions = "sessions"
+	FeatureFleet    = "fleet"
 )
 
 // DefaultControlFeatures enables all Control proxy features (seed for acme).
@@ -17,6 +20,9 @@ func DefaultControlFeatures() map[string]any {
 		FeatureHistory:  true,
 		FeatureInject:   true,
 		FeatureModerate: true,
+		FeatureRecord:   true,
+		FeatureSessions: true,
+		FeatureFleet:    true,
 	}
 }
 

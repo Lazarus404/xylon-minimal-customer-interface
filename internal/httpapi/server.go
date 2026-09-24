@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -11,15 +13,18 @@ import (
 	"github.com/Lazarus404/xylon-minimal-customer-interface/internal/customers"
 	"github.com/Lazarus404/xylon-minimal-customer-interface/internal/secretgen"
 	"github.com/Lazarus404/xylon-minimal-customer-interface/internal/storeclient"
+	"github.com/Lazarus404/xylon-minimal-customer-interface/internal/webhooksign"
+	"github.com/Lazarus404/xylon-minimal-customer-interface/internal/webhookstore"
 	"github.com/Lazarus404/xylon-minimal-customer-interface/internal/xylonclient"
 )
 
 // Server is the ops HTTP API.
 type Server struct {
-	Cfg   config.Config
-	Dir   *customers.Directory
-	Store *storeclient.Client
-	Xylon *xylonclient.Client
+	Cfg      config.Config
+	Dir      *customers.Directory
+	Store    *storeclient.Client
+	Xylon    *xylonclient.Client
+	Webhooks *webhookstore.Store
 }
 
 // Handler returns the root mux.
@@ -36,6 +41,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/customers/{id}/sessions/{sid}/history", s.handleHistory)
 	mux.HandleFunc("POST /v1/customers/{id}/sessions/{sid}/data", s.handleData)
 	mux.HandleFunc("POST /v1/customers/{id}/sessions/{sid}/moderate", s.handleModerate)
+	mux.HandleFunc("POST /v1/customers/{id}/sessions/{sid}/record/start", s.handleRecordStart)
+	mux.HandleFunc("POST /v1/customers/{id}/sessions/{sid}/record/stop", s.handleRecordStop)
+	mux.HandleFunc("GET /v1/customers/{id}/sessions/{sid}/record", s.handleRecordGet)
+	mux.HandleFunc("GET /v1/customers/{id}/sessions", s.handleSessionsList)
+	mux.HandleFunc("GET /v1/customers/{id}/fleet/summary", s.handleFleetSummary)
+	mux.HandleFunc("GET /v1/customers/{id}/fleet/nodes", s.handleFleetNodes)
+	mux.HandleFunc("POST /v1/customers/{id}/fleet/accepting", s.handleFleetAccepting)
+	mux.HandleFunc("POST /v1/webhooks/xylon", s.handleXylonWebhook)
+	mux.HandleFunc("GET /v1/webhooks/xylon/latest", s.handleXylonWebhookLatest)
 	return mux
 }
 
@@ -266,7 +280,167 @@ func (s *Server) handleModerate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleRecordStart(w http.ResponseWriter, r *http.Request) {
+	s.proxyControl(w, r, customers.FeatureRecord, func(secret, id, sid string, body []byte) (xylonclient.ProxyResult, error) {
+		return s.Xylon.RecordStart(secret, id, sid, body)
+	})
+}
+
+func (s *Server) handleRecordStop(w http.ResponseWriter, r *http.Request) {
+	s.proxyControl(w, r, customers.FeatureRecord, func(secret, id, sid string, body []byte) (xylonclient.ProxyResult, error) {
+		return s.Xylon.RecordStop(secret, id, sid, body)
+	})
+}
+
+func (s *Server) handleRecordGet(w http.ResponseWriter, r *http.Request) {
+	s.proxyControl(w, r, customers.FeatureRecord, func(secret, id, sid string, _ []byte) (xylonclient.ProxyResult, error) {
+		return s.Xylon.RecordGet(secret, id, sid)
+	})
+}
+
+func (s *Server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
+	s.proxyControlTenant(w, r, customers.FeatureSessions, func(secret, id string, _ []byte) (xylonclient.ProxyResult, error) {
+		return s.Xylon.SessionsList(secret, id)
+	})
+}
+
+func (s *Server) handleFleetSummary(w http.ResponseWriter, r *http.Request) {
+	s.proxyControlTenant(w, r, customers.FeatureFleet, func(secret, id string, _ []byte) (xylonclient.ProxyResult, error) {
+		return s.Xylon.FleetSummary(secret, id)
+	})
+}
+
+func (s *Server) handleFleetNodes(w http.ResponseWriter, r *http.Request) {
+	s.proxyControlTenant(w, r, customers.FeatureFleet, func(secret, id string, _ []byte) (xylonclient.ProxyResult, error) {
+		return s.Xylon.FleetNodes(secret, id)
+	})
+}
+
+func (s *Server) handleFleetAccepting(w http.ResponseWriter, r *http.Request) {
+	s.proxyControlTenant(w, r, customers.FeatureFleet, func(secret, id string, body []byte) (xylonclient.ProxyResult, error) {
+		return s.Xylon.FleetAccepting(secret, id, body)
+	})
+}
+
+func (s *Server) handleXylonWebhook(w http.ResponseWriter, r *http.Request) {
+	if s.Cfg.WebhookSecret == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "webhook_unconfigured"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "read_body"})
+		return
+	}
+	sig := r.Header.Get(webhooksign.Header)
+	if !webhooksign.Valid(body, s.Cfg.WebhookSecret, sig) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "bad_signature"})
+		return
+	}
+	var ev map[string]any
+	if err := json.Unmarshal(body, &ev); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
+		return
+	}
+	if s.Webhooks == nil {
+		s.Webhooks = webhookstore.New(32)
+	}
+	s.Webhooks.Add(ev)
+	if s.Cfg.AdminWebhookURL != "" {
+		s.forwardAdminWebhook(body, sig)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) forwardAdminWebhook(body []byte, sig string) {
+	req, err := http.NewRequest(http.MethodPost, s.Cfg.AdminWebhookURL, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("interface admin webhook forward build: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(webhooksign.Header, sig)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("interface admin webhook forward: %v", err)
+		return
+	}
+	_ = res.Body.Close()
+}
+
+func (s *Server) handleXylonWebhookLatest(w http.ResponseWriter, r *http.Request) {
+	if s.Webhooks == nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "empty"})
+		return
+	}
+	ev, ok := s.Webhooks.Latest()
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "empty"})
+		return
+	}
+	writeJSON(w, http.StatusOK, ev)
+}
+
 type controlCall func(secret, customerID, sessionID string, body []byte) (xylonclient.ProxyResult, error)
+
+type tenantControlCall func(secret, customerID string, body []byte) (xylonclient.ProxyResult, error)
+
+func (s *Server) proxyControlTenant(w http.ResponseWriter, r *http.Request, feature string, call tenantControlCall) {
+	if s.Xylon == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "xylon_unconfigured"})
+		return
+	}
+	id := r.PathValue("id")
+	c, ok := s.Dir.Get(id)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "not_found"})
+		return
+	}
+	if c.Status != customers.StatusActive {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "customer_suspended"})
+		return
+	}
+	if !customers.ControlAllowed(c.Features, feature) {
+		denied := feature
+		if !customers.FeatureEnabled(c.Features, customers.FeatureControl) {
+			denied = customers.FeatureControl
+		}
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "feature_denied", "feature": denied})
+		return
+	}
+
+	rec, err := s.Store.GetReveal(id)
+	if err != nil {
+		if strings.Contains(err.Error(), "not_found") {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "store_secret_missing"})
+			return
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "store_unreachable", "detail": err.Error()})
+		return
+	}
+
+	var body []byte
+	if r.Method == http.MethodPost {
+		body, err = io.ReadAll(r.Body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "read_body"})
+			return
+		}
+	}
+
+	res, err := call(rec.Current, id, body)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "xylon_unreachable", "detail": err.Error()})
+		return
+	}
+	if res.ContentType != "" {
+		w.Header().Set("Content-Type", res.ContentType)
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	w.WriteHeader(res.StatusCode)
+	_, _ = w.Write(res.Body)
+}
 
 func (s *Server) proxyControl(w http.ResponseWriter, r *http.Request, feature string, call controlCall) {
 	if s.Xylon == nil {

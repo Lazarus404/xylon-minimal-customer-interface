@@ -19,6 +19,8 @@ type Config struct {
 	AdminCustomerID       string `json:"admin_customer_id"`
 	SeedOnStart           bool   `json:"seed_on_start"`
 	DefaultGraceSec       int    `json:"default_grace_sec"`
+	WebhookSecret         string `json:"webhook_secret"`
+	AdminWebhookURL       string `json:"admin_webhook_url"`
 }
 
 // Load reads JSON config from path and applies defaults.
